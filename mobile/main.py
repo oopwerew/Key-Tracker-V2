@@ -46,6 +46,16 @@ def main(page: ft.Page):
     # Инициализация API клиента
     api = ApiClient(DEFAULT_API_URL)
 
+    # Безопасное обновление элементов (предотвращает ошибки, если элемент еще не на странице)
+    def safe_update(control):
+        try:
+            if control and getattr(control, "page", None):
+                control.update()
+            elif page:
+                page.update()
+        except Exception:
+            pass
+
     # Локальное состояние приложения
     state = {
         "active_tab": 0,           # 0: Ключи, 1: История, 2: Сервер
@@ -83,7 +93,7 @@ def main(page: ft.Page):
                     key="dot"
                 ),
                 ft.Text(
-                    "Подключение...",
+                    "Проверка...",
                     size=12,
                     color=COLOR_TEXT_MUTED,
                     weight=ft.FontWeight.W_500,
@@ -133,7 +143,7 @@ def main(page: ft.Page):
     # Поле поиска
     search_field = ft.CupertinoTextField(
         placeholder_text="Поиск по номеру, кабинету, ФИО...",
-        prefix=ft.Padding(
+        prefix=ft.Container(
             padding=ft.padding.only(left=8, right=4),
             content=ft.Icon(ft.CupertinoIcons.SEARCH, size=18, color=COLOR_TEXT_MUTED)
         ),
@@ -149,7 +159,7 @@ def main(page: ft.Page):
         filters = ["all", "available", "taken"]
         if 0 <= idx < len(filters):
             state["filter_type"] = filters[idx]
-            load_keys()
+            load_keys(show_error_toast=True)
 
     segment_control = ft.CupertinoSlidingSegmentedButton(
         selected_index=0,
@@ -165,12 +175,15 @@ def main(page: ft.Page):
 
     # Уведомления (iOS Toast / SnackBar)
     def show_alert(message: str, is_error: bool = False):
-        snack = ft.SnackBar(
-            content=ft.Text(message, color=COLOR_CARD, weight=ft.FontWeight.W_500),
-            bgcolor=COLOR_DANGER if is_error else COLOR_PRIMARY,
-            duration=3000
-        )
-        page.open(snack)
+        try:
+            snack = ft.SnackBar(
+                content=ft.Text(message, color=COLOR_CARD, weight=ft.FontWeight.W_500),
+                bgcolor=COLOR_DANGER if is_error else COLOR_PRIMARY,
+                duration=3000
+            )
+            page.open(snack)
+        except Exception:
+            pass
 
     # Обновление индикатора сети
     def update_network_indicator(online: bool, text: Optional[str] = None):
@@ -185,7 +198,7 @@ def main(page: ft.Page):
             dot.bgcolor = COLOR_DANGER
             label.value = text or "Офлайн"
             label.color = COLOR_DANGER
-        connection_indicator.update()
+        safe_update(connection_indicator)
 
     # Загрузка статистики
     def load_stats():
@@ -195,11 +208,40 @@ def main(page: ft.Page):
             stat_total_val.value = str(stats.get("total", 0))
             stat_available_val.value = str(stats.get("available", 0))
             stat_taken_val.value = str(stats.get("taken", 0))
-            stats_row.update()
+            safe_update(stats_row)
 
     # Отрисовка списка ключей
-    def render_keys(keys_data: List[Dict[str, Any]]):
+    def render_keys(keys_data: List[Dict[str, Any]], is_offline: bool = False):
         keys_list_view.controls.clear()
+
+        if is_offline:
+            keys_list_view.controls.append(
+                ft.Container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Icon(ft.CupertinoIcons.WIFI_SLASH, size=48, color=COLOR_TEXT_MUTED),
+                            ft.Text("Сервер не подключен", size=16, weight=ft.FontWeight.BOLD, color=COLOR_TEXT_DARK),
+                            ft.Text(
+                                "Запустите backend-сервер (server/run_server.sh) или проверьте адрес на вкладке «Сервер»",
+                                size=13,
+                                color=COLOR_TEXT_MUTED,
+                                text_align=ft.TextAlign.CENTER
+                            ),
+                            ft.Container(height=8),
+                            ft.CupertinoFilledButton(
+                                text="Повторить попытку",
+                                on_click=lambda e: load_keys(show_error_toast=True)
+                            )
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=8
+                    ),
+                    padding=ft.padding.all(32),
+                    alignment=ft.alignment.center
+                )
+            )
+            safe_update(keys_list_view)
+            return
 
         if not keys_data:
             keys_list_view.controls.append(
@@ -217,7 +259,7 @@ def main(page: ft.Page):
                     alignment=ft.alignment.center
                 )
             )
-            keys_list_view.update()
+            safe_update(keys_list_view)
             return
 
         for k in keys_data:
@@ -396,10 +438,10 @@ def main(page: ft.Page):
 
             keys_list_view.controls.append(card)
 
-        keys_list_view.update()
+        safe_update(keys_list_view)
 
     # Загрузка списка ключей из API
-    def load_keys():
+    def load_keys(show_error_toast: bool = False):
         ok, keys_data, err = api.get_keys(
             search=state["search_query"],
             filter_type=state["filter_type"]
@@ -407,23 +449,24 @@ def main(page: ft.Page):
         if ok:
             update_network_indicator(True)
             state["keys"] = keys_data
-            render_keys(keys_data)
+            render_keys(keys_data, is_offline=False)
             load_stats()
         else:
-            update_network_indicator(False, "Ошибка связи")
-            render_keys([])
-            show_alert(err or "Не удалось загрузить данные с сервера", is_error=True)
+            update_network_indicator(False, "Офлайн")
+            render_keys([], is_offline=True)
+            if show_error_toast:
+                show_alert(err or "Не удалось подключиться к серверу", is_error=True)
 
     def on_search_changed(query: str):
         state["search_query"] = query
-        load_keys()
+        load_keys(show_error_toast=False)
 
     # Быстрый возврат ключа
     def handle_return_key(key_id: str):
         ok, msg = api.return_key(key_id)
         if ok:
             show_alert(f"Ключ №{key_id} успешно возвращен!")
-            load_keys()
+            load_keys(show_error_toast=True)
             if state["active_tab"] == 1:
                 load_history()
         else:
@@ -463,7 +506,7 @@ def main(page: ft.Page):
         # Быстрые кнопки сроков возврата
         def set_preset_time(time_val: str):
             time_input.value = time_val
-            time_input.update()
+            safe_update(time_input)
 
         time_chips = ft.Row(
             controls=[
@@ -510,7 +553,7 @@ def main(page: ft.Page):
             if ok:
                 page.close(dialog)
                 show_alert(f"Ключ №{key_id} успешно выдан {fio}!")
-                load_keys()
+                load_keys(show_error_toast=True)
                 if state["active_tab"] == 1:
                     load_history()
             else:
@@ -584,7 +627,7 @@ def main(page: ft.Page):
             if ok:
                 page.close(add_dialog)
                 show_alert("Кабинет успешно добавлен!")
-                load_keys()
+                load_keys(show_error_toast=True)
             else:
                 show_alert(msg, is_error=True)
 
@@ -641,7 +684,7 @@ def main(page: ft.Page):
                     alignment=ft.alignment.center
                 )
             )
-            history_list_view.update()
+            safe_update(history_list_view)
             return
 
         for item in history_data:
@@ -710,7 +753,7 @@ def main(page: ft.Page):
             )
             history_list_view.controls.append(item_card)
 
-        history_list_view.update()
+        safe_update(history_list_view)
 
     # Экран настроек подключения к серверу
     server_input = ft.CupertinoTextField(
@@ -737,13 +780,13 @@ def main(page: ft.Page):
             server_status_text.value = " Подключение к API успешно установлено!"
             server_status_text.color = COLOR_SUCCESS
             show_alert("Связь с сервером подтверждена!")
-            load_keys()
+            load_keys(show_error_toast=True)
         else:
             update_network_indicator(False, "Ошибка")
             server_status_text.value = f"❌ {msg}"
             server_status_text.color = COLOR_DANGER
             show_alert(msg, is_error=True)
-        server_status_text.update()
+        safe_update(server_status_text)
 
     settings_view = ft.Container(
         content=ft.Column(
@@ -806,7 +849,7 @@ def main(page: ft.Page):
                 expand=True,
                 spacing=0
             )
-            load_keys()
+            load_keys(show_error_toast=False)
         elif tab_index == 1:
             content_area.content = ft.Column(
                 controls=[
@@ -834,7 +877,7 @@ def main(page: ft.Page):
         elif tab_index == 2:
             content_area.content = settings_view
 
-        content_area.update()
+        safe_update(content_area)
 
     # Нижняя навигационная панель (iOS Tab Bar)
     nav_bar = ft.NavigationBar(
@@ -886,7 +929,7 @@ def main(page: ft.Page):
                             icon_color=COLOR_TEXT_MUTED,
                             icon_size=22,
                             tooltip="Обновить данные",
-                            on_click=lambda e: load_keys()
+                            on_click=lambda e: load_keys(show_error_toast=True)
                         )
                     ],
                     spacing=2
@@ -897,6 +940,26 @@ def main(page: ft.Page):
         bgcolor=COLOR_CARD,
         padding=ft.padding.only(left=16, right=8, top=14, bottom=10),
         border=ft.border.only(bottom=ft.BorderSide(1, COLOR_BORDER))
+    )
+
+    # Инициализируем содержимое первой вкладки
+    content_area.content = ft.Column(
+        controls=[
+            ft.Container(
+                content=ft.Column(
+                    controls=[
+                        stats_row,
+                        search_field,
+                        segment_control
+                    ],
+                    spacing=10
+                ),
+                padding=ft.padding.symmetric(horizontal=16, vertical=8)
+            ),
+            keys_list_view
+        ],
+        expand=True,
+        spacing=0
     )
 
     # Корневой лэйаут приложения
@@ -911,9 +974,10 @@ def main(page: ft.Page):
             spacing=0
         )
     )
+    page.update()
 
-    # Первоначальный запуск: переключаем на главную вкладку и загружаем данные
-    switch_tab(0)
+    # Загружаем данные
+    load_keys(show_error_toast=False)
 
 if __name__ == "__main__":
     ft.app(target=main)
