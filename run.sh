@@ -11,6 +11,6 @@ else
     PYTHON_CMD="python3"
 fi
 
-echo "🚀 Запуск Key Tracker V2 через $PYTHON_CMD..."
-open "http://localhost:8000" 2>/dev/null &
+echo "🚀 Запуск Key Tracker V2 через $PYTHON_CMD на http://localhost:8080..."
+open "http://localhost:8080" 2>/dev/null &
 exec $PYTHON_CMD server.py
