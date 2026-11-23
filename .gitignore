@@ -11,3 +11,5 @@ server/*.db
 .flet/
 build/
 dist/
+*.apk
+*.apk
