@@ -37,9 +37,19 @@ def init_db():
         notes TEXT,
         status TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available', 'taken')),
         taken_by TEXT,
-        taken_at TEXT
+        taken_at TEXT,
+        phone TEXT,
+        expected_return TEXT
     )
     """)
+
+    # Миграция колонок phone и expected_return, если база уже существовала
+    cursor.execute("PRAGMA table_info(keys)")
+    columns = [row["name"] for row in cursor.fetchall()]
+    if "phone" not in columns:
+        cursor.execute("ALTER TABLE keys ADD COLUMN phone TEXT")
+    if "expected_return" not in columns:
+        cursor.execute("ALTER TABLE keys ADD COLUMN expected_return TEXT")
 
     # Таблица истории операций (Audit Log)
     cursor.execute("""
@@ -77,20 +87,20 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM keys")
     if cursor.fetchone()[0] == 0:
         initial_keys = [
-            ("101", "Компьютерный класс №1", 1, "ПК 1-15, проектор", "available", None, None),
-            ("102", "Лекционная аудитория", 1, "100 мест, микрофон", "available", None, None),
-            ("205", "Учительская / Кафедра", 2, "Главный вход", "taken", "Иванов Алексей Сергеевич", "2026-11-23 14:30"),
-            ("208", "Лаборатория физики", 2, "Стенды и оборудование", "available", None, None),
-            ("304", "Конференц-зал", 3, "Экран, видеоконференция", "available", None, None),
-            ("310", "Серверная комната", 3, "Доступ только IT-отделу", "taken", "Смирнов К.В.", "2026-11-23 16:15"),
+            ("101", "Компьютерный класс №1", 1, "ПК 1-15, проектор", "available", None, None, None, None),
+            ("102", "Лекционная аудитория", 1, "100 мест, микрофон", "available", None, None, None, None),
+            ("205", "Учительская / Кафедра", 2, "Главный вход", "taken", "Иванов Алексей Сергеевич", "2026-11-23 14:30", "+7(999)111-22-33", "до 18:00"),
+            ("208", "Лаборатория физики", 2, "Стенды и оборудование", "available", None, None, None, None),
+            ("304", "Конференц-зал", 3, "Экран, видеоконференция", "available", None, None, None, None),
+            ("310", "Серверная комната", 3, "Доступ только IT-отделу", "taken", "Смирнов К.В.", "2026-11-23 16:15", "IT-отдел", "до конца дня"),
         ]
         cursor.executemany(
-            "INSERT INTO keys (id, name, floor, notes, status, taken_by, taken_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO keys (id, name, floor, notes, status, taken_by, taken_at, phone, expected_return) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             initial_keys
         )
 
         initial_history = [
-            ("2026-11-23 14:30", "Выдача ключа", "205", "Учительская / Кафедра", "Иванов Алексей Сергеевич", "Выдан преподавателю"),
+            ("2026-11-23 14:30", "Выдача ключа", "205", "Учительская / Кафедра", "Иванов Алексей Сергеевич", "Выдан преподавателю (до 18:00)"),
             ("2026-11-23 16:15", "Выдача ключа", "310", "Серверная комната", "Смирнов К.В.", "Плановые работы")
         ]
         cursor.executemany(
@@ -128,7 +138,7 @@ def create_user(full_name: str, username: str, password_hash: str, role: str):
     return user_id
 
 # Функции кабинетов
-def get_keys(search: str = "", status_filter: str = "all"):
+def get_keys(search: str = None, status_filter: str = None):
     conn = get_connection()
     query = "SELECT * FROM keys WHERE 1=1"
     params = []
@@ -137,10 +147,10 @@ def get_keys(search: str = "", status_filter: str = "all"):
         query += " AND status = ?"
         params.append(status_filter)
 
-    if search:
+    if search and search.strip():
         search_term = f"%{search.strip().lower()}%"
-        query += " AND (LOWER(id) LIKE ? OR LOWER(name) LIKE ? OR LOWER(IFNULL(taken_by, '')) LIKE ?)"
-        params.extend([search_term, search_term, search_term])
+        query += " AND (LOWER(id) LIKE ? OR LOWER(name) LIKE ? OR LOWER(IFNULL(taken_by, '')) LIKE ? OR LOWER(IFNULL(phone, '')) LIKE ?)"
+        params.extend([search_term, search_term, search_term, search_term])
 
     query += " ORDER BY CAST(id AS INTEGER), id ASC"
     rows = conn.execute(query, params).fetchall()
@@ -159,20 +169,31 @@ def add_key(key_id: str, name: str, floor: int, notes: str = ""):
     cursor.execute("SELECT id FROM keys WHERE id = ?", (str(key_id).strip(),))
     if cursor.fetchone():
         conn.close()
-        return False, f"Кабинет с номером {key_id} уже существует!"
+        return False, f"Кабинет с номером {key_id} уже существует!", None
 
+    new_key = {
+        "id": str(key_id).strip(),
+        "name": name.strip(),
+        "floor": floor,
+        "notes": (notes or "").strip(),
+        "status": "available",
+        "taken_by": None,
+        "taken_at": None,
+        "phone": None,
+        "expected_return": None
+    }
     cursor.execute(
         "INSERT INTO keys (id, name, floor, notes, status) VALUES (?, ?, ?, ?, 'available')",
-        (str(key_id).strip(), name.strip(), floor, notes.strip())
+        (new_key["id"], new_key["name"], new_key["floor"], new_key["notes"])
     )
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     cursor.execute(
         "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
-        (now_str, "Добавлен кабинет", str(key_id).strip(), name.strip(), "Администратор", "Создан в системе")
+        (now_str, "Добавлен кабинет", new_key["id"], new_key["name"], "Администратор", "Создан в системе")
     )
     conn.commit()
     conn.close()
-    return True, "Кабинет успешно добавлен"
+    return True, "Кабинет успешно добавлен", new_key
 
 def delete_key(key_id: str):
     conn = get_connection()
@@ -192,54 +213,66 @@ def delete_key(key_id: str):
     conn.close()
     return True, "Кабинет удален"
 
-def issue_key(key_id: str, recipient_name: str, admin_name: str):
+def issue_key(key_id: str, recipient_name: str, admin_name: str = "Администратор", phone: str = None, expected_return: str = None):
     conn = get_connection()
     cursor = conn.cursor()
     key = conn.execute("SELECT * FROM keys WHERE id = ?", (str(key_id).strip(),)).fetchone()
     if not key:
         conn.close()
-        return False, "Кабинет не найден"
+        return False, "Кабинет не найден", None
     if key["status"] == "taken":
         conn.close()
-        return False, f"Ключ уже выдан пользователю {key['taken_by']}"
+        return False, f"Ключ уже выдан пользователю {key['taken_by']}", None
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     cursor.execute(
-        "UPDATE keys SET status = 'taken', taken_by = ?, taken_at = ? WHERE id = ?",
-        (recipient_name.strip(), now_str, str(key_id).strip())
+        "UPDATE keys SET status = 'taken', taken_by = ?, taken_at = ?, phone = ?, expected_return = ? WHERE id = ?",
+        (recipient_name.strip(), now_str, phone.strip() if phone else None, expected_return.strip() if expected_return else None, str(key_id).strip())
     )
+    details = f"Выдал: {admin_name}"
+    if phone:
+        details += f" • Тел/отдел: {phone.strip()}"
+    if expected_return:
+        details += f" • Возврат: {expected_return.strip()}"
+
     cursor.execute(
         "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
-        (now_str, "Выдача ключа", str(key_id).strip(), key["name"], recipient_name.strip(), f"Выдал: {admin_name}")
+        (now_str, "Выдача ключа", str(key_id).strip(), key["name"], recipient_name.strip(), details)
     )
     conn.commit()
+    updated_key = dict(conn.execute("SELECT * FROM keys WHERE id = ?", (str(key_id).strip(),)).fetchone())
     conn.close()
-    return True, "Ключ успешно выдан"
+    return True, "Ключ успешно выдан", updated_key
 
-def return_key(key_id: str, admin_name: str):
+def return_key(key_id: str, admin_name: str = "Администратор", notes: str = None):
     conn = get_connection()
     cursor = conn.cursor()
     key = conn.execute("SELECT * FROM keys WHERE id = ?", (str(key_id).strip(),)).fetchone()
     if not key:
         conn.close()
-        return False, "Кабинет не найден"
+        return False, "Кабинет не найден", None
     if key["status"] == "available":
         conn.close()
-        return False, "Ключ уже в наличии"
+        return False, "Ключ уже в наличии", None
 
     prev_user = key["taken_by"] or "Не указан"
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     cursor.execute(
-        "UPDATE keys SET status = 'available', taken_by = NULL, taken_at = NULL WHERE id = ?",
+        "UPDATE keys SET status = 'available', taken_by = NULL, taken_at = NULL, phone = NULL, expected_return = NULL WHERE id = ?",
         (str(key_id).strip(),)
     )
+    details = f"Принял: {admin_name}"
+    if notes:
+        details += f" • Примечание: {notes.strip()}"
+
     cursor.execute(
         "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
-        (now_str, "Возврат ключа", str(key_id).strip(), key["name"], prev_user, f"Принял: {admin_name}")
+        (now_str, "Возврат ключа", str(key_id).strip(), key["name"], prev_user, details)
     )
     conn.commit()
+    updated_key = dict(conn.execute("SELECT * FROM keys WHERE id = ?", (str(key_id).strip(),)).fetchone())
     conn.close()
-    return True, "Ключ успешно возвращен"
+    return True, "Ключ успешно возвращен", updated_key
 
 def get_stats():
     conn = get_connection()

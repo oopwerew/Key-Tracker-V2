@@ -266,6 +266,8 @@ function createRoomRowElement(key) {
       <span class="taken-details">
         <span class="taken-name">${escapeHtml(key.taken_by || 'Не указан')}</span>
         ${key.taken_at ? '<span class="taken-date"> (с ' + escapeHtml(key.taken_at) + ')</span>' : ''}
+        ${key.phone ? '<span class="taken-date"> • ' + escapeHtml(key.phone) + '</span>' : ''}
+        ${key.expected_return ? '<span class="taken-date" style="color: var(--warning-text); font-weight: 500;"> • До: ' + escapeHtml(key.expected_return) + '</span>' : ''}
       </span>
     `;
   }
