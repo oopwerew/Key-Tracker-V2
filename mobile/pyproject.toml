@@ -1,0 +1,17 @@
+[project]
+name = "key-tracker-mobile"
+version = "1.0.0"
+description = "Key Tracker — мобильное приложение администратора ресепшена (учёт и выдача ключей)"
+requires-python = ">=3.9"
+dependencies = [
+    "flet==0.28.3",
+    "httpx>=0.24.0",
+]
+
+[tool.flet]
+org = "com.keytracker"
+product = "KeyTracker"
+company = "Key Tracker"
+copyright = "Copyright (c) 2026 Key Tracker"
+build_number = 1
+build_version = "1.0.0"
