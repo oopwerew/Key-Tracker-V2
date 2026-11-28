@@ -6,6 +6,9 @@ let currentUser = null;
 let currentFilter = 'all';
 let currentSearch = '';
 let searchTimeout = null;
+let myRequests = [];
+let allRequests = [];
+let pollTimer = null;
 
 // Инициализация при загрузке страницы
 document.addEventListener('DOMContentLoaded', () => {
@@ -42,6 +45,12 @@ async function checkAuth() {
 }
 
 function showAuthScreen() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  myRequests = [];
+  allRequests = [];
   document.getElementById('authScreen').style.display = 'flex';
   document.getElementById('appScreen').style.display = 'none';
   clearAuthAlert();
@@ -63,10 +72,20 @@ function showAppScreen() {
     roleBadge.textContent = 'Пользователь';
     roleBadge.className = 'role-badge user';
     document.getElementById('adminActionButtons').style.display = 'none';
+    document.getElementById('adminRequestsPanel').style.display = 'none';
   }
 
-  loadStats();
-  loadRooms();
+  refreshDashboard();
+
+  // Автообновление каждые 4 секунды для мгновенной синхронизации заявок
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(refreshDashboard, 4000);
+}
+
+async function refreshDashboard() {
+  if (!currentUser) return;
+  await Promise.all([loadStats(), loadRequests()]);
+  await loadRooms();
 }
 
 function switchAuthTab(tab) {
@@ -249,12 +268,42 @@ function createRoomRowElement(key) {
   const colStatus = document.createElement('div');
   colStatus.className = 'col-status';
 
+  const myActiveReq = !isAdmin
+    ? myRequests.find(r => r.key_id === key.id && (r.status === 'pending' || r.status === 'approved'))
+    : null;
+  const myRejectedReq = (!isAdmin && !myActiveReq)
+    ? myRequests.find(r => r.key_id === key.id && r.status === 'rejected')
+    : null;
+
+  const adminApprovedReq = isAdmin
+    ? allRequests.find(r => r.key_id === key.id && r.status === 'approved')
+    : null;
+  const adminPendingCount = isAdmin
+    ? allRequests.filter(r => r.key_id === key.id && r.status === 'pending').length
+    : 0;
+
   if (isAvailable) {
+    let extraBadge = '';
+    if (!isAdmin && myActiveReq) {
+      if (myActiveReq.status === 'pending') {
+        extraBadge = '<span class="status-badge pending"><span class="status-dot"></span>Ожидает подтверждения</span>';
+      } else if (myActiveReq.status === 'approved') {
+        extraBadge = '<span class="status-badge approved"><span class="status-dot"></span>Одобрено админом</span>';
+      }
+    } else if (!isAdmin && myRejectedReq) {
+      extraBadge = '<span class="status-badge rejected"><span class="status-dot"></span>Запрос отклонён</span>';
+    } else if (isAdmin && adminApprovedReq) {
+      extraBadge = `<span class="status-badge approved"><span class="status-dot"></span>Одобрено для: ${escapeHtml(adminApprovedReq.user_name)}</span>`;
+    } else if (isAdmin && adminPendingCount > 0) {
+      extraBadge = `<span class="status-badge pending"><span class="status-dot"></span>Заявок: ${adminPendingCount}</span>`;
+    }
+
     colStatus.innerHTML = `
       <span class="status-badge available">
         <span class="status-dot"></span>
         В наличии
       </span>
+      ${extraBadge}
     `;
   } else {
     colStatus.innerHTML = `
@@ -297,8 +346,30 @@ function createRoomRowElement(key) {
       `;
     }
   } else {
-    // Для обычного пользователя действия скрыты согласно ТЗ
-    colActions.innerHTML = '';
+    // Действия пользователя: Запрос ключа -> Ожидание -> Взять ключ после подтверждения админа
+    if (isAvailable) {
+      if (myActiveReq && myActiveReq.status === 'approved') {
+        colActions.innerHTML = `
+          <button class="btn btn-success btn-action" onclick="takeApprovedKey(${myActiveReq.id})">
+            Взять ключ
+          </button>
+        `;
+      } else if (myActiveReq && myActiveReq.status === 'pending') {
+        colActions.innerHTML = `
+          <button class="btn btn-secondary btn-action" onclick="cancelMyRequest(${myActiveReq.id})">
+            Отменить запрос
+          </button>
+        `;
+      } else {
+        colActions.innerHTML = `
+          <button class="btn btn-primary btn-action" onclick="openRequestKeyModal('${escapeHtml(key.id)}', '${escapeHtml(key.name)}')">
+            Запросить ключ
+          </button>
+        `;
+      }
+    } else {
+      colActions.innerHTML = '';
+    }
   }
 
   row.appendChild(colInfo);
@@ -365,13 +436,13 @@ async function submitIssueKey(e) {
     const data = await res.json();
     if (res.ok) {
       closeModal('issueModal');
-      loadStats();
-      loadRooms();
+      showToast('Ключ успешно выдан');
+      refreshDashboard();
     } else {
-      alert(data.detail || 'Ошибка выдачи');
+      showToast(data.detail || 'Ошибка выдачи', 'error');
     }
   } catch (err) {
-    alert('Не удалось отправить запрос');
+    showToast('Не удалось отправить запрос', 'error');
   }
 }
 
@@ -383,13 +454,13 @@ async function returnKey(keyId) {
     });
     const data = await res.json();
     if (res.ok) {
-      loadStats();
-      loadRooms();
+      showToast('Ключ принят на хранение');
+      refreshDashboard();
     } else {
-      alert(data.detail || 'Ошибка возврата');
+      showToast(data.detail || 'Ошибка возврата', 'error');
     }
   } catch (err) {
-    alert('Не удалось отправить запрос');
+    showToast('Не удалось отправить запрос', 'error');
   }
 }
 
@@ -419,13 +490,13 @@ async function submitAddKey(e) {
     const data = await res.json();
     if (res.ok) {
       closeModal('addKeyModal');
-      loadStats();
-      loadRooms();
+      showToast('Кабинет успешно добавлен');
+      refreshDashboard();
     } else {
-      alert(data.detail || 'Ошибка добавления кабинета');
+      showToast(data.detail || 'Ошибка добавления кабинета', 'error');
     }
   } catch (err) {
-    alert('Не удалось отправить запрос');
+    showToast('Не удалось отправить запрос', 'error');
   }
 }
 
@@ -445,13 +516,13 @@ async function confirmDeleteKey() {
     const data = await res.json();
     if (res.ok) {
       closeModal('deleteModal');
-      loadStats();
-      loadRooms();
+      showToast('Кабинет удалён');
+      refreshDashboard();
     } else {
-      alert(data.detail || 'Ошибка удаления');
+      showToast(data.detail || 'Ошибка удаления', 'error');
     }
   } catch (err) {
-    alert('Не удалось отправить запрос');
+    showToast('Не удалось отправить запрос', 'error');
   }
 }
 
@@ -518,4 +589,254 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+
+// ==========================================
+//       ЗАПРОСЫ НА ПОЛУЧЕНИЕ КЛЮЧЕЙ
+// ==========================================
+
+async function loadRequests() {
+  if (!currentUser) return;
+  try {
+    const endpoint = currentUser.role === 'admin' ? '/api/requests' : '/api/requests/my';
+    const res = await fetchWithAuth(endpoint);
+    if (!res.ok) return;
+
+    const data = await res.json();
+    if (currentUser.role === 'admin') {
+      allRequests = data;
+      renderAdminRequestsPanel();
+    } else {
+      myRequests = data;
+    }
+  } catch (err) {
+    console.error('Ошибка загрузки заявок:', err);
+  }
+}
+
+function renderAdminRequestsPanel() {
+  const panel = document.getElementById('adminRequestsPanel');
+  const list = document.getElementById('adminRequestsList');
+  const headerBadge = document.getElementById('pendingRequestsBadge');
+  const panelBadge = document.getElementById('panelPendingCount');
+
+  const pending = allRequests.filter(r => r.status === 'pending');
+
+  if (pending.length > 0) {
+    headerBadge.textContent = pending.length;
+    headerBadge.style.display = 'inline-flex';
+    panelBadge.textContent = pending.length;
+    panel.style.display = 'block';
+  } else {
+    headerBadge.style.display = 'none';
+    panel.style.display = 'none';
+    return;
+  }
+
+  list.innerHTML = '';
+  pending.forEach(req => {
+    const row = document.createElement('div');
+    row.className = 'request-row';
+
+    const metaParts = [];
+    if (req.created_at) metaParts.push(escapeHtml(req.created_at));
+    if (req.expected_return) metaParts.push(`Возврат: ${escapeHtml(req.expected_return)}`);
+    if (req.comment) metaParts.push(escapeHtml(req.comment));
+
+    row.innerHTML = `
+      <div class="col-info">
+        <div class="room-badge">№${escapeHtml(req.key_id)}</div>
+        <div class="room-details">
+          <div class="room-name">${escapeHtml(req.key_name || 'Кабинет')}</div>
+          <div class="room-sub">${metaParts.join('  •  ')}</div>
+        </div>
+      </div>
+      <div class="col-status">
+        <span class="status-badge pending">
+          <span class="status-dot"></span>
+          Запрос
+        </span>
+        <span class="taken-details">
+          <span class="taken-name">${escapeHtml(req.user_name)}</span>
+        </span>
+      </div>
+      <div class="col-actions">
+        <button class="btn btn-success btn-approve" onclick="approveRequest(${req.id})">
+          <span class="icon" style="width: 14px; height: 14px;"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>
+          Подтвердить
+        </button>
+        <button class="btn-reject" onclick="rejectRequest(${req.id})">
+          <span class="icon" style="width: 14px; height: 14px;"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+          Отклонить
+        </button>
+      </div>
+    `;
+    list.appendChild(row);
+  });
+}
+
+function openRequestKeyModal(keyId, keyName) {
+  document.getElementById('reqKeyId').value = keyId;
+  document.getElementById('requestModalTitle').textContent = `Запрос ключа №${keyId} (${keyName})`;
+  document.getElementById('reqExpectedReturn').value = 'до конца дня';
+  document.getElementById('reqComment').value = '';
+  openModal('requestKeyModal');
+}
+
+async function submitKeyRequest(e) {
+  e.preventDefault();
+  const key_id = document.getElementById('reqKeyId').value;
+  const expected_return = document.getElementById('reqExpectedReturn').value.trim();
+  const comment = document.getElementById('reqComment').value.trim();
+
+  try {
+    const res = await fetchWithAuth('/api/requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_id, expected_return, comment })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      closeModal('requestKeyModal');
+      showToast('Запрос отправлен администратору');
+      refreshDashboard();
+    } else {
+      showToast(data.detail || 'Ошибка отправки запроса', 'error');
+    }
+  } catch (err) {
+    showToast('Не удалось отправить запрос', 'error');
+  }
+}
+
+async function cancelMyRequest(reqId) {
+  try {
+    const res = await fetchWithAuth(`/api/requests/${reqId}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Запрос отменён');
+      refreshDashboard();
+    } else {
+      showToast(data.detail || 'Ошибка отмены запроса', 'error');
+    }
+  } catch (err) {
+    showToast('Не удалось отправить запрос', 'error');
+  }
+}
+
+async function takeApprovedKey(reqId) {
+  try {
+    const res = await fetchWithAuth(`/api/requests/${reqId}/take`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Ключ успешно получен!');
+      refreshDashboard();
+    } else {
+      showToast(data.detail || 'Не удалось взять ключ', 'error');
+    }
+  } catch (err) {
+    showToast('Не удалось отправить запрос', 'error');
+  }
+}
+
+async function approveRequest(reqId) {
+  try {
+    const res = await fetchWithAuth(`/api/requests/${reqId}/approve`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Запрос подтверждён. Пользователь теперь может взять ключ.');
+      await refreshDashboard();
+      if (document.getElementById('requestsModal').classList.contains('active')) {
+        renderAllRequestsTable();
+      }
+    } else {
+      showToast(data.detail || 'Ошибка подтверждения', 'error');
+    }
+  } catch (err) {
+    showToast('Не удалось отправить запрос', 'error');
+  }
+}
+
+async function rejectRequest(reqId) {
+  try {
+    const res = await fetchWithAuth(`/api/requests/${reqId}/reject`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Запрос отклонён');
+      await refreshDashboard();
+      if (document.getElementById('requestsModal').classList.contains('active')) {
+        renderAllRequestsTable();
+      }
+    } else {
+      showToast(data.detail || 'Ошибка отклонения', 'error');
+    }
+  } catch (err) {
+    showToast('Не удалось отправить запрос', 'error');
+  }
+}
+
+async function openRequestsModal() {
+  openModal('requestsModal');
+  await loadRequests();
+  renderAllRequestsTable();
+}
+
+function renderAllRequestsTable() {
+  const tbody = document.getElementById('allRequestsTableBody');
+  tbody.innerHTML = '';
+
+  if (allRequests.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">Заявок пока нет</td></tr>';
+    return;
+  }
+
+  const statusLabels = {
+    pending: { text: 'Ожидает', cls: 'pending' },
+    approved: { text: 'Одобрено', cls: 'approved' },
+    taken: { text: 'Ключ взят', cls: 'available' },
+    rejected: { text: 'Отклонено', cls: 'rejected' },
+    cancelled: { text: 'Отменено', cls: 'rejected' }
+  };
+
+  allRequests.forEach(req => {
+    const tr = document.createElement('tr');
+    const st = statusLabels[req.status] || { text: req.status, cls: 'pending' };
+    const actionsHtml = req.status === 'pending'
+      ? `
+        <div style="display: flex; gap: 6px;">
+          <button class="btn btn-success" style="padding: 5px 10px; font-size: 12px;" onclick="approveRequest(${req.id})">Подтвердить</button>
+          <button class="btn-reject" style="height: 28px; padding: 0 8px; font-size: 12px;" onclick="rejectRequest(${req.id})">Отклонить</button>
+        </div>
+      `
+      : `<span style="color: var(--text-muted); font-size: 12px;">${req.admin_name ? escapeHtml(req.admin_name) : '—'}</span>`;
+
+    tr.innerHTML = `
+      <td style="color: var(--text-muted); font-size: 12px;">${escapeHtml(req.created_at)}</td>
+      <td style="font-weight: 500;">№${escapeHtml(req.key_id)} (${escapeHtml(req.key_name || '')})</td>
+      <td>${escapeHtml(req.user_name)}${req.comment ? '<div style="font-size: 11px; color: var(--text-muted);">' + escapeHtml(req.comment) + '</div>' : ''}</td>
+      <td><span class="status-badge ${st.cls}">${st.text}</span></td>
+      <td>${actionsHtml}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function showToast(message, type = 'success') {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.remove();
+  }, 3500);
 }

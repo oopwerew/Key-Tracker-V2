@@ -64,6 +64,11 @@ class IssueKeyRequest(BaseModel):
 class ReturnKeyRequest(BaseModel):
     notes: Optional[str] = None
 
+class CreateKeyRequestPayload(BaseModel):
+    key_id: str = Field(..., min_length=1)
+    comment: Optional[str] = ""
+    expected_return: Optional[str] = ""
+
 
 # ==========================================
 #               SYSTEM / HEALTH
@@ -278,6 +283,63 @@ def get_audit_log(request: Request, limit: int = 100):
             if isinstance(e, HTTPException): raise e
 
     return database.get_history(limit=limit)
+
+
+# ==========================================
+#       ЗАПРОСЫ ПОЛЬЗОВАТЕЛЕЙ НА КЛЮЧИ
+# ==========================================
+
+@app.post("/api/requests", status_code=status.HTTP_201_CREATED, tags=["Requests"])
+def create_request_endpoint(req: CreateKeyRequestPayload, user: dict = Depends(auth.get_current_user)):
+    ok, msg, new_req = database.create_key_request(
+        key_id=req.key_id,
+        user_id=user["id"],
+        user_name=user["full_name"],
+        comment=req.comment or "",
+        expected_return=req.expected_return or ""
+    )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+    return {"status": "success", "message": msg, "request": new_req}
+
+@app.get("/api/requests/my", tags=["Requests"])
+def get_my_requests_endpoint(user: dict = Depends(auth.get_current_user)):
+    return database.get_requests(user_id=user["id"])
+
+@app.post("/api/requests/{req_id}/take", tags=["Requests"])
+def take_approved_key_endpoint(req_id: int, user: dict = Depends(auth.get_current_user)):
+    code, msg, updated_key = database.take_approved_key(req_id=req_id, user_id=user["id"])
+    if code != 200:
+        raise HTTPException(status_code=code, detail=msg)
+    return {"status": "success", "message": msg, "key": updated_key}
+
+@app.delete("/api/requests/{req_id}", tags=["Requests"])
+def cancel_request_endpoint(req_id: int, user: dict = Depends(auth.get_current_user)):
+    code, msg = database.cancel_key_request(req_id=req_id, user_id=user["id"])
+    if code != 200:
+        raise HTTPException(status_code=code, detail=msg)
+    return {"status": "success", "message": msg}
+
+@app.get("/api/requests", tags=["Requests"])
+def list_all_requests_endpoint(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    admin: dict = Depends(auth.require_admin)
+):
+    return database.get_requests(status_filter=status_filter)
+
+@app.post("/api/requests/{req_id}/approve", tags=["Requests"])
+def approve_request_endpoint(req_id: int, admin: dict = Depends(auth.require_admin)):
+    ok, msg, updated_req = database.approve_key_request(req_id=req_id, admin_name=admin["full_name"])
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+    return {"status": "success", "message": msg, "request": updated_req}
+
+@app.post("/api/requests/{req_id}/reject", tags=["Requests"])
+def reject_request_endpoint(req_id: int, admin: dict = Depends(auth.require_admin)):
+    ok, msg, updated_req = database.reject_key_request(req_id=req_id, admin_name=admin["full_name"])
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+    return {"status": "success", "message": msg, "request": updated_req}
 
 
 # ==========================================

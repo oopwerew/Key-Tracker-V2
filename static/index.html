@@ -191,6 +191,11 @@
 
       <!-- Действия администратора (скрыты для обычного пользователя) -->
       <div id="adminActionButtons" class="admin-actions" style="display: none;">
+        <button class="btn btn-secondary" onclick="openRequestsModal()">
+          <span class="icon"><svg viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg></span>
+          Заявки
+          <span id="pendingRequestsBadge" class="count-badge" style="display: none;">0</span>
+        </button>
         <button class="btn btn-secondary" onclick="openHistoryModal()">
           <span class="icon"><svg viewBox="0 0 24 24"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg></span>
           Журнал операций
@@ -199,6 +204,22 @@
           <span class="icon"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span>
           Добавить кабинет
         </button>
+      </div>
+    </section>
+
+    <!-- 3.5. Панель входящих запросов для администратора -->
+    <section id="adminRequestsPanel" class="requests-card" style="display: none;">
+      <div class="requests-header">
+        <div class="requests-title-wrap">
+          <span class="requests-icon">
+            <span class="icon"><svg viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span>
+          </span>
+          <h3>Запросы на выдачу ключей</h3>
+          <span id="panelPendingCount" class="count-badge">0</span>
+        </div>
+      </div>
+      <div id="adminRequestsList">
+        <!-- Заявки генерируются в app.js -->
       </div>
     </section>
 
@@ -329,6 +350,71 @@
       </div>
     </div>
   </div>
+
+  <!-- Модальное окно: Запрос ключа пользователем -->
+  <div id="requestKeyModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="requestModalTitle">Запрос ключа у администратора</h3>
+        <button class="modal-close" onclick="closeModal('requestKeyModal')">
+          <span class="icon" style="width: 18px; height: 18px;"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+        </button>
+      </div>
+      <form onsubmit="submitKeyRequest(event)">
+        <div class="modal-body">
+          <input type="hidden" id="reqKeyId">
+          <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 14px;">
+            После отправки заявки администратор должен подтвердить её — только после этого вы сможете взять ключ.
+          </p>
+          <div class="form-group">
+            <label class="form-label" for="reqExpectedReturn">Ориентировочное время возврата</label>
+            <input type="text" id="reqExpectedReturn" class="form-input" placeholder="например, до 18:00 или до конца дня" value="до конца дня">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="reqComment">Комментарий / цель (необязательно)</label>
+            <input type="text" id="reqComment" class="form-input" placeholder="например, проведение пары или настройка оборудования">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('requestKeyModal')">Отмена</button>
+          <button type="submit" class="btn btn-primary">Отправить запрос</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Модальное окно: Все заявки (для администратора) -->
+  <div id="requestsModal" class="modal-overlay">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3>Все заявки на ключи</h3>
+        <button class="modal-close" onclick="closeModal('requestsModal')">
+          <span class="icon" style="width: 18px; height: 18px;"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
+        </button>
+      </div>
+      <div class="modal-body" style="max-height: 480px; overflow-y: auto; padding: 0;">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Дата</th>
+              <th>Кабинет</th>
+              <th>Пользователь</th>
+              <th>Статус</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody id="allRequestsTableBody">
+            <!-- Заполняется в app.js -->
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('requestsModal')">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastContainer" class="toast-container"></div>
 
   <script src="/static/app.js"></script>
 </body>

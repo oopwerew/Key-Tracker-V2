@@ -63,6 +63,22 @@ def init_db():
         details TEXT
     )
     """)
+
+    # Таблица запросов на получение ключей (Пользователь -> Админ)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS key_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,
+        comment TEXT,
+        expected_return TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'taken', 'cancelled')),
+        admin_name TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """)
     conn.commit()
 
     # Проверяем, есть ли начальные пользователи
@@ -206,6 +222,10 @@ def delete_key(key_id: str):
     cursor.execute("DELETE FROM keys WHERE id = ?", (str(key_id).strip(),))
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     cursor.execute(
+        "UPDATE key_requests SET status = 'cancelled', updated_at = ? WHERE key_id = ? AND status IN ('pending', 'approved')",
+        (now_str, str(key_id).strip())
+    )
+    cursor.execute(
         "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
         (now_str, "Удален кабинет", str(key_id).strip(), key["name"], "Администратор", "Удален из системы")
     )
@@ -228,6 +248,10 @@ def issue_key(key_id: str, recipient_name: str, admin_name: str = "Админи�
     cursor.execute(
         "UPDATE keys SET status = 'taken', taken_by = ?, taken_at = ?, phone = ?, expected_return = ? WHERE id = ?",
         (recipient_name.strip(), now_str, phone.strip() if phone else None, expected_return.strip() if expected_return else None, str(key_id).strip())
+    )
+    cursor.execute(
+        "UPDATE key_requests SET status = 'rejected', admin_name = ?, updated_at = ? WHERE key_id = ? AND status IN ('pending', 'approved')",
+        (admin_name, now_str, str(key_id).strip())
     )
     details = f"Выдал: {admin_name}"
     if phone:
@@ -291,3 +315,239 @@ def get_history(limit: int = 100):
     rows = conn.execute("SELECT * FROM history ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ==========================================
+#       ЗАПРОСЫ ПОЛЬЗОВАТЕЛЕЙ НА КЛЮЧИ
+# ==========================================
+
+def create_key_request(key_id: str, user_id: int, user_name: str, comment: str = "", expected_return: str = ""):
+    conn = get_connection()
+    cursor = conn.cursor()
+    key = cursor.execute("SELECT * FROM keys WHERE id = ?", (str(key_id).strip(),)).fetchone()
+    if not key:
+        conn.close()
+        return False, "Кабинет не найден", None
+    if key["status"] == "taken":
+        conn.close()
+        return False, f"Ключ уже на руках у пользователя {key['taken_by']}", None
+
+    existing = cursor.execute(
+        "SELECT * FROM key_requests WHERE key_id = ? AND user_id = ? AND status IN ('pending', 'approved')",
+        (str(key_id).strip(), user_id)
+    ).fetchone()
+    if existing:
+        conn.close()
+        msg = "Ваш запрос уже одобрен администратором — вы можете взять ключ" if existing["status"] == "approved" else "Вы уже отправили запрос на этот ключ"
+        return False, msg, None
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cursor.execute(
+        """INSERT INTO key_requests (key_id, user_id, user_name, comment, expected_return, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+        (str(key_id).strip(), user_id, user_name.strip(), (comment or "").strip(), (expected_return or "").strip(), now_str, now_str)
+    )
+    req_id = cursor.lastrowid
+
+    details = "Ожидает подтверждения администратора"
+    if expected_return and expected_return.strip():
+        details += f" • Возврат: {expected_return.strip()}"
+    if comment and comment.strip():
+        details += f" • {comment.strip()}"
+
+    cursor.execute(
+        "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
+        (now_str, "Запрос ключа", str(key_id).strip(), key["name"], user_name.strip(), details)
+    )
+    conn.commit()
+    new_req = dict(cursor.execute("""
+        SELECT r.*, k.name AS key_name, k.floor AS key_floor
+        FROM key_requests r
+        LEFT JOIN keys k ON r.key_id = k.id
+        WHERE r.id = ?
+    """, (req_id,)).fetchone())
+    conn.close()
+    return True, "Запрос отправлен администратору", new_req
+
+def get_requests(user_id: int = None, status_filter: str = None, limit: int = 100):
+    conn = get_connection()
+    query = """
+        SELECT r.*, k.name AS key_name, k.floor AS key_floor, k.status AS key_status
+        FROM key_requests r
+        LEFT JOIN keys k ON r.key_id = k.id
+        WHERE 1=1
+    """
+    params = []
+    if user_id is not None:
+        query += " AND r.user_id = ?"
+        params.append(user_id)
+    if status_filter and status_filter in ("pending", "approved", "rejected", "taken", "cancelled"):
+        query += " AND r.status = ?"
+        params.append(status_filter)
+
+    query += " ORDER BY r.id DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_request_by_id(req_id: int):
+    conn = get_connection()
+    row = conn.execute("""
+        SELECT r.*, k.name AS key_name, k.floor AS key_floor, k.status AS key_status
+        FROM key_requests r
+        LEFT JOIN keys k ON r.key_id = k.id
+        WHERE r.id = ?
+    """, (req_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def approve_key_request(req_id: int, admin_name: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    req = cursor.execute("SELECT * FROM key_requests WHERE id = ?", (req_id,)).fetchone()
+    if not req:
+        conn.close()
+        return False, "Запрос не найден", None
+    if req["status"] != "pending":
+        conn.close()
+        return False, "Запрос уже обработан", None
+
+    key = cursor.execute("SELECT * FROM keys WHERE id = ?", (req["key_id"],)).fetchone()
+    if not key:
+        conn.close()
+        return False, "Кабинет не найден", None
+    if key["status"] == "taken":
+        conn.close()
+        return False, f"Ключ уже на руках у {key['taken_by']}", None
+
+    other_approved = cursor.execute(
+        "SELECT id, user_name FROM key_requests WHERE key_id = ? AND status = 'approved' AND id != ?",
+        (req["key_id"], req_id)
+    ).fetchone()
+    if other_approved:
+        conn.close()
+        return False, f"Этот ключ уже одобрен для пользователя {other_approved['user_name']}", None
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cursor.execute(
+        "UPDATE key_requests SET status = 'approved', admin_name = ?, updated_at = ? WHERE id = ?",
+        (admin_name.strip(), now_str, req_id)
+    )
+    cursor.execute(
+        "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
+        (now_str, "Запрос одобрен", req["key_id"], key["name"], req["user_name"], f"Одобрил: {admin_name.strip()}")
+    )
+    conn.commit()
+    updated = dict(cursor.execute("SELECT * FROM key_requests WHERE id = ?", (req_id,)).fetchone())
+    conn.close()
+    return True, "Запрос подтверждён! Теперь пользователь сможет взять ключ.", updated
+
+def reject_key_request(req_id: int, admin_name: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    req = cursor.execute("SELECT * FROM key_requests WHERE id = ?", (req_id,)).fetchone()
+    if not req:
+        conn.close()
+        return False, "Запрос не найден", None
+    if req["status"] not in ("pending", "approved"):
+        conn.close()
+        return False, "Нельзя отклонить уже завершённый запрос", None
+
+    key = cursor.execute("SELECT * FROM keys WHERE id = ?", (req["key_id"],)).fetchone()
+    key_name = key["name"] if key else ""
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cursor.execute(
+        "UPDATE key_requests SET status = 'rejected', admin_name = ?, updated_at = ? WHERE id = ?",
+        (admin_name.strip(), now_str, req_id)
+    )
+    cursor.execute(
+        "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
+        (now_str, "Запрос отклонён", req["key_id"], key_name, req["user_name"], f"Отклонил: {admin_name.strip()}")
+    )
+    conn.commit()
+    updated = dict(cursor.execute("SELECT * FROM key_requests WHERE id = ?", (req_id,)).fetchone())
+    conn.close()
+    return True, "Запрос отклонён", updated
+
+def take_approved_key(req_id: int, user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    req = cursor.execute("SELECT * FROM key_requests WHERE id = ?", (req_id,)).fetchone()
+    if not req:
+        conn.close()
+        return 404, "Запрос не найден", None
+    if req["user_id"] != user_id:
+        conn.close()
+        return 403, "Доступ запрещён: это не ваш запрос", None
+    if req["status"] != "approved":
+        conn.close()
+        if req["status"] == "pending":
+            return 403, "Доступ запрещён: администратор ещё не подтвердил этот запрос", None
+        return 400, "Запрос недействителен или уже использован", None
+
+    key = cursor.execute("SELECT * FROM keys WHERE id = ?", (req["key_id"],)).fetchone()
+    if not key:
+        conn.close()
+        return 404, "Кабинет не найден", None
+    if key["status"] == "taken":
+        conn.close()
+        return 400, f"Ключ уже выдан пользователю {key['taken_by']}", None
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cursor.execute(
+        "UPDATE keys SET status = 'taken', taken_by = ?, taken_at = ?, expected_return = ? WHERE id = ?",
+        (req["user_name"], now_str, req["expected_return"] or None, req["key_id"])
+    )
+    cursor.execute(
+        "UPDATE key_requests SET status = 'taken', updated_at = ? WHERE id = ?",
+        (now_str, req_id)
+    )
+    # Отклоняем остальные ожидающие заявки на этот ключ
+    cursor.execute(
+        "UPDATE key_requests SET status = 'rejected', admin_name = 'Система', updated_at = ? WHERE key_id = ? AND status = 'pending' AND id != ?",
+        (now_str, req["key_id"], req_id)
+    )
+
+    details = f"Взято по одобренной заявке (Одобрил: {req['admin_name'] or 'Администратор'})"
+    if req["expected_return"]:
+        details += f" • Возврат: {req['expected_return']}"
+    cursor.execute(
+        "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
+        (now_str, "Выдача ключа", req["key_id"], key["name"], req["user_name"], details)
+    )
+    conn.commit()
+    updated_key = dict(cursor.execute("SELECT * FROM keys WHERE id = ?", (req["key_id"],)).fetchone())
+    conn.close()
+    return 200, "Ключ успешно получен!", updated_key
+
+def cancel_key_request(req_id: int, user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    req = cursor.execute("SELECT * FROM key_requests WHERE id = ?", (req_id,)).fetchone()
+    if not req:
+        conn.close()
+        return 404, "Запрос не найден"
+    if req["user_id"] != user_id:
+        conn.close()
+        return 403, "Доступ запрещён: вы не можете отменить чужой запрос"
+    if req["status"] not in ("pending", "approved"):
+        conn.close()
+        return 400, "Запрос уже завершён"
+
+    key = cursor.execute("SELECT * FROM keys WHERE id = ?", (req["key_id"],)).fetchone()
+    key_name = key["name"] if key else ""
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cursor.execute(
+        "UPDATE key_requests SET status = 'cancelled', updated_at = ? WHERE id = ?",
+        (now_str, req_id)
+    )
+    cursor.execute(
+        "INSERT INTO history (timestamp, action, key_id, key_name, user_name, details) VALUES (?, ?, ?, ?, ?, ?)",
+        (now_str, "Отмена запроса", req["key_id"], key_name, req["user_name"], "Отменено пользователем")
+    )
+    conn.commit()
+    conn.close()
+    return 200, "Запрос отменён"
